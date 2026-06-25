@@ -44,3 +44,7 @@ jobs:
       # 8. Run the test suite
       - name: Test (Pytest)
         run: uv run pytest
+        env:
+          # Inject a fake key so Pydantic successfully builds the Settings object
+          API_KEY: "sk-dummy-testing-key-123"
+          APP_ENV: "testing"
