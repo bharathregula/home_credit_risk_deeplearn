@@ -1,0 +1,28 @@
+repos:
+  # General house-keeping hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0  # (Check for the latest version if desired)
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  # Ruff: Linting and Formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.2
+    hooks:
+      # Run the linter and try to auto-fix issues
+      - id: ruff
+        args: [ --fix ]
+      # Run the formatter
+      - id: ruff-format
+
+  # Mypy: Type Checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        # If your package imports things that mypy needs to know about,
+        # you may need to add them here (e.g., pydantic, types-requests)
+        additional_dependencies: []
