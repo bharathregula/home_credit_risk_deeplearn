@@ -23,6 +23,6 @@ repos:
     rev: v1.11.2
     hooks:
       - id: mypy
-        # If your package imports things that mypy needs to know about,
-        # you may need to add them here (e.g., pydantic, types-requests)
-        additional_dependencies: []
+        additional_dependencies:
+          - pydantic>=2.13.4
+          - pydantic-settings>=2.14.2
