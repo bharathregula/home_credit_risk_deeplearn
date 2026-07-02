@@ -196,7 +196,7 @@ def identify_outliers(
     numeric_cols: Optional[List[str]] = None,
     z_threshold: float = 3.0,
     top_n: int = 20,
-) -> pd.DataFrame:
+) -> pd.Series:
     """
     Identify outliers using z-score method.
 
@@ -213,8 +213,8 @@ def identify_outliers(
 
     Returns:
     --------
-    pd.DataFrame
-        Summary of outliers by feature
+    pd.Series
+        Count of outliers per feature, sorted descending
     """
     print(f"\n{'=' * 60}")
     print(f"Outlier Detection (Z-score > {z_threshold})")
@@ -283,7 +283,7 @@ def analyze_correlations(
     target_col: str = "TARGET",
     top_n: int = 15,
     figsize: Tuple[int, int] = (10, 8),
-) -> pd.Series:
+) -> Optional[pd.Series]:
     """
     Analyze correlation between numeric features and target variable.
 
@@ -300,8 +300,8 @@ def analyze_correlations(
 
     Returns:
     --------
-    pd.Series
-        Correlations sorted by absolute value
+    Optional[pd.Series]
+        Correlations sorted by absolute value, or None if target_col is missing
     """
     if target_col not in df.columns:
         print(f"Target column '{target_col}' not found in dataframe")

@@ -18,9 +18,12 @@ dependencies = [
 dev = [
     "ipykernel>=7.3.0",
     "mypy>=2.1.0",
+    "pandas-stubs>=3.0.3.260530",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "ruff>=0.15.20",
+    "scipy-stubs>=1.18.0.0",
+    "types-seaborn>=0.13.2.20260518",
 ]
 
 # --- RUFF CONFIGURATION ---
