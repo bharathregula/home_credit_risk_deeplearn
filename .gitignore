@@ -15,3 +15,14 @@ wheels/
 
 # VS Code
 .vscode/
+
+#MAC OS related files
+.DS_Store
+*/DS_Store
+
+#Claude files
+.claude/
+CLAUDE.MD
+
+#ipynb checkpoints
+.ipynb_checkpoints/

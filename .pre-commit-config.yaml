@@ -8,9 +8,15 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
 
+  # Strip notebook outputs before committing
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+
   # Ruff: Linting and Formatting
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.2
+    rev: v0.15.20
     hooks:
       # Run the linter and try to auto-fix issues
       - id: ruff
@@ -20,7 +26,7 @@ repos:
 
   # Mypy: Type Checking
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
+    rev: v2.1.0
     hooks:
       - id: mypy
         additional_dependencies:
