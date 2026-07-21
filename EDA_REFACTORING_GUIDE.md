@@ -1,238 +1,158 @@
-# EDA Refactoring Summary
+# EDA Utilities Guide (`eda_utils`)
 
-## Overview
-Your EDA notebooks have been refactored to follow a clean, modular architecture with reusable functions and focused analysis scope.
+The EDA notebooks share a small **polars** helper module,
+[`src/home_credit_risk/eda_utils.py`](src/home_credit_risk/eda_utils.py). Notebooks
+call these helpers instead of duplicating analysis code, so every dataset notebook
+follows the same structure.
 
----
+For the dataset-by-dataset **findings**, see
+[`docs/INDIVIDUAL_DATASET_EDA_SUMMARY.md`](docs/INDIVIDUAL_DATASET_EDA_SUMMARY.md).
 
-## Key Changes
-
-### 1. **Created Reusable EDA Module** (`src/home_credit_risk/eda_utils.py`)
-
-This module contains 10 reusable functions for exploratory data analysis:
-
-#### Core Analysis Functions:
-- **`display_basic_info(df, df_name)`** - Display shape, dtypes, and dataset info
-- **`show_missing_patterns(df, threshold)`** - Analyze and visualize missing data
-- **`analyze_target_distribution(df, target_col, figsize)`** - Analyze and plot target variable
-- **`check_duplicates(df, id_col)`** - Check for duplicate records/IDs
-
-#### Feature Analysis Functions:
-- **`analyze_numeric_features(df, figsize, show_summary)`** - Distribution and boxplot analysis
-- **`identify_outliers(df, numeric_cols, z_threshold, top_n)`** - Z-score outlier detection with visualization
-- **`analyze_categorical_features(df)`** - Unique values and distributions
-- **`analyze_correlations(df, target_col, top_n, figsize)`** - Correlation matrix and heatmap
-
-#### Quality & Engineering Functions:
-- **`check_data_quality(df)`** - Check for negative values, logical inconsistencies, and data issues
-- **`identify_feature_engineering_opportunities(df, target_col)`** - Suggest and calculate engineered features
-
-### 2. **Refactored EDA.ipynb** (Application_train.csv only)
-
-**Scope:** Exclusively analyzes the `application_train.csv` dataset
-
-**Structure:**
-```
-1. Setup and Data Loading
-   └─ Imports, configuration, path setup
-2. Basic Dataset Exploration
-   └─ Dataset info, dtypes, summary statistics
-3. Missing Data Analysis
-   └─ Missing patterns, duplicate checks
-4. Target Variable Analysis
-   └─ Distribution, class imbalance
-5. Numeric Features Analysis
-   └─ Distributions, skewness, boxplots, outlier detection
-6. Categorical Features Analysis
-   └─ Unique values, distributions
-7. Correlation Analysis
-   └─ Feature-target correlations, heatmap
-8. Data Quality Checks
-   └─ Negative values, logical inconsistencies, impossible values
-9. Feature Engineering Opportunities
-   └─ Ratio features, derived features
-```
-
-**Improvements:**
-- ✅ Clean section organization with markdown headers
-- ✅ Removed multi-dataset merging code
-- ✅ Uses reusable functions from `eda_utils`
-- ✅ Focused, readable, maintainable code
-- ✅ Better documentation and commented sections
-
-### 3. **Refactored bureau_eda.ipynb** (Bureau datasets)
-
-**Scope:** Analyzes `bureau.csv` and `bureau_balance.csv` with merged analysis
-
-**Structure:**
-```
-1. Setup and Data Loading
-2. Bureau Dataset Exploration
-3. Bureau Balance Dataset Exploration
-4. Merged Bureau Analysis
-5. Missing Data Analysis (for each dataset)
-6. Numeric Features Analysis (for each dataset)
-7. Categorical Features Analysis (for each dataset)
-8. Data Quality Checks (for each dataset)
-9. Feature Engineering Opportunities (for each dataset)
-```
-
-**Template Pattern:**
-- Uses the same functions as `EDA.ipynb`
-- Demonstrates how to apply functions to different datasets
-- Can be copied for other datasets (previous_application, pos_cash_balance, etc.)
+> All helpers operate on eager `pl.DataFrame` objects. When working with a
+> `pl.LazyFrame` (e.g. `pl.scan_csv`), call `.collect()` before passing it in.
 
 ---
 
-## How to Use for Other Datasets
+## Functions
 
-To create EDA notebooks for other datasets (e.g., `previous_application.csv`), follow this template:
+### Overview / structure
+- **`display_basic_info(df, df_name="Dataset") -> None`** — shape and dtypes.
+- **`show_missing_patterns(df, threshold=0.0) -> pl.DataFrame`** — per-column
+  missing count / percentage (identifier columns are **kept** here).
+- **`analyze_target_distribution(df, target_col="TARGET", figsize=(8, 5)) -> None`**
+  — value counts + bar/pie plot of the target.
+- **`check_duplicates(df, id_col=None) -> None`** — full-row duplicates, plus
+  duplicate `id_col` values if given.
+
+### Feature analysis
+- **`analyze_numeric_features(df, figsize=(18, 6), show_summary=True, exclude=None) -> pl.DataFrame`**
+  — describe, skewness, boxplots.
+- **`identify_outliers(df, numeric_cols=None, z_threshold=3.0, top_n=20, exclude=None) -> pl.DataFrame`**
+  — z-score outlier counts per feature.
+- **`analyze_categorical_features(df) -> None`** — unique values and value counts
+  for string/categorical columns.
+- **`analyze_correlations(df, target_col="TARGET", top_n=15, figsize=(10, 8), exclude=None) -> Optional[pl.DataFrame]`**
+  — correlation of numeric features with the target (+ heatmap); returns `None` if
+  `target_col` is absent.
+
+> The four feature-analysis helpers above **auto-exclude `SK_ID*` identifier
+> columns** — describe / correlation / outlier scores over a hashed id are
+> meaningless. Pass `exclude=[...]` to drop additional columns. The `target_col`
+> is always retained by `analyze_correlations`.
+
+### Quality & engineering
+- **`check_data_quality(df) -> None`** — **generic**, domain-agnostic checks:
+  fully-null columns, constant (single-value) columns, and duplicate rows. It does
+  **not** hard-code any dataset's column names; table-specific business rules live in
+  the individual notebooks.
+- **`identify_feature_engineering_opportunities(df, target_col="TARGET") -> pl.DataFrame`**
+  — builds candidate ratio/age features and **returns a new frame** with them
+  appended (polars frames are immutable — the input is not mutated).
+- **`detect_sentinel_values(df, sentinel=365243, columns=None, exclude=None) -> pl.DataFrame`**
+  — finds a repeated numeric sentinel (notably Home Credit's `365243` "not
+  applicable / never" placeholder in `DAYS_*` columns). When scanning all columns it
+  **auto-skips `SK_ID*`** identifiers so an id coinciding with the sentinel is not a
+  false positive.
+- **`check_categorical_placeholders(df, placeholders=("XNA", "XAP")) -> pl.DataFrame`**
+  — counts placeholder tokens in string/categorical columns (functional missingness
+  not stored as null).
+
+---
+
+## Notebook structure
+
+Each notebook in [`notebooks/individual_dataset_eda/`](notebooks/individual_dataset_eda)
+follows the same skeleton:
+
+```
+1. Setup and Data Loading        (polars read_csv / scan_csv)
+2. Basic Dataset Exploration     (display_basic_info, describe)
+3. Missing Data Analysis         (show_missing_patterns, check_duplicates)
+4. Numeric Features Analysis     (analyze_numeric_features, identify_outliers)
+5. Categorical Features Analysis (analyze_categorical_features)
+6. Standard Data Quality Checks  (check_data_quality — generic)
+7. Functional / Business-Logic Quality Checks   (table-specific, inline)
+```
+
+`application_eda.ipynb` additionally has target-distribution, correlation-with-TARGET,
+and feature-engineering sections (it is the only table with a `TARGET`), and it holds
+the application-specific business rules that used to live in `check_data_quality`.
+
+---
+
+## Template for a new dataset notebook
 
 ```python
-# 1. Import the reusable functions
+import polars as pl
 from home_credit_risk.eda_utils import (
     display_basic_info,
     show_missing_patterns,
+    check_duplicates,
     analyze_numeric_features,
     identify_outliers,
     analyze_categorical_features,
     check_data_quality,
-    identify_feature_engineering_opportunities
+    detect_sentinel_values,
+    check_categorical_placeholders,
 )
 
-# 2. Load dataset
-df = pd.read_csv(datasets / 'your_dataset.csv')
+# The whole frame is reused by every check, so collect it once.
+df = pl.read_csv(datasets / "your_dataset.csv", infer_schema_length=100000)
 
-# 3. Run analyses in order
-display_basic_info(df, df_name='YourDataset')
+display_basic_info(df, df_name="YourDataset")
 show_missing_patterns(df)
-analyze_numeric_features(df)
+check_duplicates(df)                 # or check_duplicates(df, id_col="SK_ID_PREV")
+analyze_numeric_features(df)         # SK_ID* auto-excluded
 identify_outliers(df)
 analyze_categorical_features(df)
-check_data_quality(df)
-identify_feature_engineering_opportunities(df, target_col=None)  # None if no target
+check_data_quality(df)               # generic
+detect_sentinel_values(df)           # SK_ID* auto-excluded
+check_categorical_placeholders(df)
+
+# Then a "Functional / Business-Logic Quality Checks" section with inline polars
+# expressions encoding this table's own consistency rules.
 ```
+
+For very large tables (e.g. `bureau_balance`), prefer lazy `pl.scan_csv(...)` and
+`.collect()` at display points; see `bureau_eda.ipynb`.
 
 ---
 
-## Function Parameters Reference
-
-### `display_basic_info()`
-```python
-display_basic_info(df: pd.DataFrame, df_name: str = "Dataset")
-```
-
-### `show_missing_patterns()`
-```python
-show_missing_patterns(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame
-# threshold: only show columns with missing % > threshold
-```
-
-### `analyze_target_distribution()`
-```python
-analyze_target_distribution(df: pd.DataFrame, target_col: str = 'TARGET', figsize: Tuple = (8, 5))
-```
-
-### `analyze_numeric_features()`
-```python
-analyze_numeric_features(df: pd.DataFrame, figsize: Tuple = (18, 6), show_summary: bool = True) -> pd.DataFrame
-```
-
-### `identify_outliers()`
-```python
-identify_outliers(
-    df: pd.DataFrame,
-    numeric_cols: Optional[List[str]] = None,  # If None, uses all numeric columns
-    z_threshold: float = 3.0,  # Z-score threshold
-    top_n: int = 20  # Top N features to visualize
-) -> pd.DataFrame
-```
-
-### `analyze_categorical_features()`
-```python
-analyze_categorical_features(df: pd.DataFrame)
-```
-
-### `analyze_correlations()`
-```python
-analyze_correlations(
-    df: pd.DataFrame,
-    target_col: str = 'TARGET',  # Set to None if dataset has no target
-    top_n: int = 15,  # Number of top features to visualize
-    figsize: Tuple = (10, 8)
-) -> pd.Series
-```
-
-### `check_data_quality()`
-```python
-check_data_quality(df: pd.DataFrame)
-```
-
-### `identify_feature_engineering_opportunities()`
-```python
-identify_feature_engineering_opportunities(df: pd.DataFrame, target_col: str = 'TARGET')
-# Set target_col=None for datasets without a target variable
-```
-
----
-
-## File Structure After Refactoring
+## Current layout
 
 ```
 home_credit_risk_deeplearn/
-├── src/
-│   └── home_credit_risk/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── logger.py
-│       ├── main.py
-│       ├── eda_utils.py          ← NEW: Reusable EDA functions
-│       └── trivial_test.py
+├── src/home_credit_risk/
+│   ├── config.py
+│   ├── logger.py
+│   ├── eda_utils.py                     # shared polars EDA helpers
+│   ├── main.py
+│   └── trivial_test.py
 ├── notebooks/
-│   ├── EDA.ipynb                 ← REFACTORED: Application_train only
-│   └── bureau_eda.ipynb          ← REFACTORED: Bureau datasets
+│   └── individual_dataset_eda/
+│       ├── application_eda.ipynb
+│       ├── bureau_eda.ipynb             # bureau.csv + bureau_balance.csv
+│       ├── previous_application_eda.ipynb
+│       ├── credit_card_balance_eda.ipynb
+│       ├── installments_payments_eda.ipynb
+│       └── pos_cash_balance_eda.ipynb
+├── docs/
+│   └── INDIVIDUAL_DATASET_EDA_SUMMARY.md
 ├── tests/
-│   └── test_trivial.py
+│   ├── test_trivial.py
+│   └── test_eda_utils.py
 ├── pyproject.toml
 └── README.md
 ```
 
 ---
 
-## Benefits of This Refactoring
+## Conventions
 
-✅ **DRY Principle**: Common EDA operations are centralized
-✅ **Consistency**: All EDA notebooks follow the same structure
-✅ **Maintainability**: Bug fixes in one function benefit all notebooks
-✅ **Scalability**: Easy to add new datasets with minimal code
-✅ **Readability**: Clear, organized, well-documented code
-✅ **Reusability**: Functions work across different dataset sizes and structures
-✅ **Focused Analysis**: Each notebook has a single, clear scope
-
----
-
-## Next Steps
-
-1. **Create additional EDA notebooks** for other datasets using the same pattern:
-   - `previous_application_eda.ipynb`
-   - `pos_cash_balance_eda.ipynb`
-   - `installments_payments_eda.ipynb`
-   - `credit_card_balance_eda.ipynb`
-
-2. **Consider adding more utility functions** for:
-   - Feature selection analysis
-   - Distribution comparison across datasets
-   - Correlation to target variable analysis
-
-3. **Document findings** in each notebook's summary section for reference during modeling
-
----
-
-## Running the Notebooks
-
-The notebooks use absolute paths, so ensure the dataset path is correct:
-```python
-datasets = Path('/Users/bharathregula/code/datasets/home-credit-default-risk')
-```
-
-If your dataset location changes, update this path in all notebooks.
+- **DRY** — common operations live in `eda_utils`; a fix there benefits every notebook.
+- **Report, don't mutate** — helpers print a summary and return a `pl.DataFrame` (or
+  `None`); cleaning/remediation is a separate, explicit step in the notebook.
+- **Generic vs table-specific** — `eda_utils` stays table-agnostic; column-specific
+  business rules live inline in each notebook's functional-checks section.
+- **Datasets are not in the repo** — notebooks load them from a local path
+  (`~/code/datasets/home-credit-default-risk`); update it if your location differs.

@@ -49,7 +49,7 @@ uv run pytest
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-unv run mypy src
+uv run mypy src
 ```
 
 ## Pre-commit hooks
@@ -61,6 +61,19 @@ uv run pre-commit install
 uv run pre-commit run --all-files
 ```
 
+## Exploratory data analysis
+
+EDA for each Home Credit dataset lives in
+[notebooks/individual_dataset_eda](notebooks/individual_dataset_eda) and reuses the
+shared helpers in [src/home_credit_risk/eda_utils.py](src/home_credit_risk/eda_utils.py).
+
+For a detailed, dataset-by-dataset write-up of what was checked and what was found
+(shapes, grains, missing data, and the table-specific business-logic quality checks),
+see **[docs/INDIVIDUAL_DATASET_EDA_SUMMARY.md](docs/INDIVIDUAL_DATASET_EDA_SUMMARY.md)**.
+
+The Kaggle Home Credit datasets are not stored in the repo; the notebooks load them
+from a local path.
+
 ## Project layout
 
 ```text
@@ -68,11 +81,19 @@ src/home_credit_risk/
 ├── __init__.py
 ├── config.py
 ├── logger.py
+├── eda_utils.py        # shared polars EDA helpers
 ├── main.py
 └── trivial_test.py
 
+notebooks/
+└── individual_dataset_eda/   # one EDA notebook per dataset
+
+docs/
+└── INDIVIDUAL_DATASET_EDA_SUMMARY.md
+
 tests/
-└── test_trivial.py
+├── test_trivial.py
+└── test_eda_utils.py
 ```
 
 ## Next steps
