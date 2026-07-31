@@ -5,21 +5,25 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "lightgbm>=4.7.0",
     "matplotlib>=3.11.0",
+    "mlflow>=3.11",
     "numpy>=2.5.0",
-    "pandas>=3.0.3",
+    "optuna>=4.9.0",
+    "pandas>=2.2,<3",
     "polars>=1.42.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "scikit-learn>=1.9.0",
     "seaborn>=0.13.2",
+    "torch>=2.13.0",
 ]
 
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
     "mypy>=2.1.0",
-    "pandas-stubs>=3.0.3.260530",
+    "pandas-stubs<3",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "ruff>=0.15.20",
@@ -45,6 +49,12 @@ warn_return_any = true
 warn_unused_configs = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+
+# scikit-learn ships no py.typed, so a strict run cannot follow it. lightgbm, optuna,
+# mlflow and polars all do, and are checked normally.
+[[tool.mypy.overrides]]
+module = ["sklearn.*"]
+ignore_missing_imports = true
 
 # --- PYTEST CONFIGURATION ---
 [tool.pytest.ini_options]

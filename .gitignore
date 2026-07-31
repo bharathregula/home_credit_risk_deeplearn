@@ -26,3 +26,16 @@ CLAUDE.MD
 
 #ipynb checkpoints
 .ipynb_checkpoints/
+
+# MLflow local file store
+mlruns/
+mlartifacts/
+mlflow.db
+
+# Optuna study store (resumable hyperparameter search state)
+optuna.db
+
+# sensitive material
+docs/MODEL_WHITEPAPER.md
+docs/MODEL_WHITEPAPER.pdf
+docs/INTERVIEW_PREP.md

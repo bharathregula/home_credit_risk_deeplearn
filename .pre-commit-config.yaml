@@ -6,7 +6,13 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+      # Raised from the 500 KB default to admit docs/feature_dictionary.csv (575 KB),
+      # the machine-readable half of the feature dictionary. It is a considered
+      # deliverable, not an accidental data commit — which is what this hook exists to
+      # catch. Regenerating it after a features.py change can push it over 600 KB; raise
+      # this again rather than dropping the file, or the README link goes dead.
       - id: check-added-large-files
+        args: [--maxkb=600]
 
   # Strip notebook outputs before committing
   - repo: https://github.com/kynan/nbstripout
@@ -25,10 +31,23 @@ repos:
       - id: ruff-format
 
   # Mypy: Type Checking
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.1.0
+  #
+  # Runs in the *project* environment (`uv run`), not an isolated hook venv, so that the
+  # hook and CI type-check against the same dependency set. The isolated mirrors-mypy
+  # hook could only be given a hand-listed subset of dependencies, and anything missing
+  # from that list silently resolved to `Any` — which under `strict` turns into errors
+  # the hook reports and CI does not. `torch.nn.Module` was the case that bit: three
+  # "Class cannot subclass Module (has type Any)" errors in `nn.py` that CI never saw,
+  # and that adding torch to `additional_dependencies` would have fixed only by
+  # downloading it a second time into the hook's own venv.
+  #
+  # `pass_filenames: false` + `mypy .` for the same reason: CI checks the whole repo, so
+  # checking only the staged files here would be a second way for the two to disagree.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.13.4
-          - pydantic-settings>=2.14.2
+        name: mypy
+        entry: uv run mypy .
+        language: system
+        types: [python]
+        pass_filenames: false
