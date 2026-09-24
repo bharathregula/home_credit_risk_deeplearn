@@ -366,6 +366,39 @@ runs, and now eliminated from the headline figure: the reported 0.79478 comes fr
 with `n_estimators` fixed and `early_stopping_rounds=None`, so predictions use every tree
 and no iteration is chosen from the scored fold (`scripts/tune_gbt.py final`).
 
+## Class reweighting: measured, and it loses
+
+`scale_pos_weight` was originally ruled out on the grounds that "ROC-AUC is invariant to
+class reweighting". **That reasoning was wrong as stated**, so it was tested
+(`scripts/tune_gbt.py reweight --n-estimators 1946`): the final configuration re-fitted
+twice on the canonical folds, toggling only the weight.
+
+| | Unweighted | `scale_pos_weight = 11.39` | Δ |
+|---|---:|---:|---:|
+| OOF ROC-AUC | **0.79478** | 0.79317 | **−0.00161** |
+| OOF PR-AUC | **0.29270** | 0.29008 | −0.00262 |
+| Folds won | **5 of 5** | 0 of 5 | sign test p = 0.031 |
+| Mean predicted PD | **0.07976** | 0.34864 | 4.32× the base rate |
+| Brier | **0.065290** | 0.158903 | 2.4× worse |
+| ECE | **0.003109** | 0.267910 | 86× worse |
+
+**Where the original reasoning went wrong.** At the *population optimum* a class weight
+gives `q = wπ/(1+π(w−1))`, strictly increasing in `π` — a monotone transform, so identical
+ranking and identical AUC. That part is correct. It does not transfer to a *fitted* model:
+the weight changes the training objective, so a different model is fitted. Split gain is
+`ΣG²/(H+λ)` with `λ = 21.42` fixed while reweighting scales `G` and `H`;
+`min_sum_hessian_in_leaf` is denominated in hessian units; and finite capacity gets
+allocated toward positive-dense regions.
+
+**The direct evidence:** Spearman ρ between the two OOF score vectors is **0.9823, not
+1.0**. A pure monotone rescale would give exactly 1.0. The rank disagreement *is* the
+refit.
+
+The unweighted half reproduced `gbt-final` to five decimals, which doubles as a
+determinism check on the whole pipeline. Calibration was the decisive factor: the
+unweighted model is well calibrated with no post-hoc correction (0.988× the base rate),
+and the reweighted one is not usable as a PD.
+
 ## Next steps
 
 1. **NN round — the pivot.** GBT optimisation is closed; see below for why. Run on the

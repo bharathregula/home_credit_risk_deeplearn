@@ -422,6 +422,136 @@ def mode_final(args: argparse.Namespace) -> None:
     print(f"  mlflow run {run_id}")
 
 
+def _calibration(y: np.ndarray, p: np.ndarray, bins: int = 10) -> Dict[str, float]:
+    """
+    Calibration-in-the-large, Brier score, and equal-count ECE.
+
+    Ranking metrics cannot see miscalibration at all — every number here is invariant to
+    nothing, which is exactly why they are the right instruments for this comparison.
+    ``mean_pred`` against the base rate is the headline: a reweighted model's
+    predictions are pushed off the true posterior by a known monotone factor, and this
+    measures how far.
+    """
+    order = np.argsort(p)
+    edges = np.array_split(order, bins)
+    ece = sum(
+        len(idx) * abs(float(p[idx].mean()) - float(y[idx].mean()))
+        for idx in edges
+        if len(idx)
+    ) / len(y)
+    return {
+        "mean_pred": float(p.mean()),
+        "base_rate": float(y.mean()),
+        "calibration_ratio": float(p.mean() / y.mean()),
+        "brier": float(np.mean((p - y) ** 2)),
+        "ece": float(ece),
+    }
+
+
+def mode_reweight(args: argparse.Namespace) -> None:
+    """
+    Measure what ``scale_pos_weight`` actually does to this model.
+
+    The whitepaper (§3.4) ruled reweighting out by reasoning: at the population optimum
+    a class weight is a monotone transform of the posterior, so it cannot move a ranking
+    metric — but a *fitted* GBT is not at that optimum, so ROC-AUC can drift either way.
+    This runs the exact final configuration twice, toggling only the weight, on the
+    canonical folds.
+
+    Both halves are fitted here rather than reusing the stored ``gbt-final`` scores,
+    because the interesting quantity is calibration and OOF prediction vectors were
+    never persisted. The model is deterministic at a fixed seed, so the paired per-fold
+    comparison needs no noise-floor caveat.
+    """
+    X, y, feature_cols, cat_idx = prepare()
+    best = _best_params() if args.use_study else {}
+    base = {
+        **DEFAULT_PARAMS,
+        **best,
+        "learning_rate": TARGET_LR,
+        "n_estimators": args.n_estimators,
+    }
+    ratio = float((y == 0).sum()) / float((y == 1).sum())
+    weight = args.weight if args.weight is not None else ratio
+    print(
+        f"base rate {y.mean():.4%}  neg/pos ratio {ratio:.2f}  "
+        f"testing scale_pos_weight={weight:.2f}",
+        flush=True,
+    )
+
+    outcomes: Dict[str, CVResult] = {}
+    for label, w in [("unweighted", None), ("reweighted", weight)]:
+        params = dict(base)
+        if w is not None:
+            params["scale_pos_weight"] = w
+        t0 = time.time()
+        print(f"\n=== {label} ===", flush=True)
+        with start_run(
+            f"gbt-reweight-{label}",
+            params={
+                **params,
+                "cv_seed": SEED,
+                "n_splits": N_SPLITS,
+                "early_stopping": False,
+            },
+            tags={"model": "lightgbm", "round": "reweight"},
+        ):
+            result = cross_validate(X, y, cat_idx, params, early_stopping_rounds=None)
+            cal = _calibration(y, result.oof_pred)
+            log_cv_metrics(
+                result.fold_scores,
+                {
+                    "oof_roc_auc": result.oof_roc_auc,
+                    "oof_pr_auc": result.oof_pr_auc,
+                    "runtime_seconds": time.time() - t0,
+                    **cal,
+                },
+            )
+        outcomes[label] = result
+        _report(result, f"{label} ({args.n_estimators} trees, no early stopping)")
+        print(f"  mean_pred {cal['mean_pred']:.5f} vs base {cal['base_rate']:.5f}")
+        print(f"  Brier {cal['brier']:.6f}   ECE {cal['ece']:.6f}")
+
+    a, b = outcomes["unweighted"], outcomes["reweighted"]
+    deltas = [t - u for u, t in zip(a.fold_scores, b.fold_scores)]
+    wins = sum(d > 0 for d in deltas)
+    print("\n" + "=" * 62)
+    print("PAIRED PER-FOLD COMPARISON (reweighted - unweighted)")
+    for i, d in enumerate(deltas, 1):
+        print(
+            f"  fold {i}: {a.fold_scores[i - 1]:.5f} -> {b.fold_scores[i - 1]:.5f}"
+            f"   {d:+.5f}"
+        )
+    print(f"  reweighting wins {wins}/{len(deltas)} folds")
+    print(
+        f"  OOF ROC-AUC {a.oof_roc_auc:.5f} -> {b.oof_roc_auc:.5f} "
+        f"({b.oof_roc_auc - a.oof_roc_auc:+.5f})"
+    )
+    print(
+        f"  OOF PR-AUC  {a.oof_pr_auc:.5f} -> {b.oof_pr_auc:.5f} "
+        f"({b.oof_pr_auc - a.oof_pr_auc:+.5f})"
+    )
+
+    ca, cb = _calibration(y, a.oof_pred), _calibration(y, b.oof_pred)
+    print("\nCALIBRATION (what reweighting actually changes)")
+    print(f"  base rate            {ca['base_rate']:.5f}")
+    print(f"  mean predicted PD    {ca['mean_pred']:.5f} -> {cb['mean_pred']:.5f}")
+    print(
+        f"  ratio to base rate   {ca['calibration_ratio']:.3f}x -> "
+        f"{cb['calibration_ratio']:.3f}x"
+    )
+    print(f"  Brier                {ca['brier']:.6f} -> {cb['brier']:.6f}")
+    print(f"  ECE (10 equal bins)  {ca['ece']:.6f} -> {cb['ece']:.6f}")
+
+    # Rank correlation: how much of the reordering is real vs. a pure rescale?
+    from scipy.stats import spearmanr
+
+    rho = float(spearmanr(a.oof_pred, b.oof_pred).statistic)
+    print(f"\n  Spearman rho between the two score vectors: {rho:.6f}")
+    print("  (1.0 would mean a pure monotone rescale -- identical ranking, and")
+    print("   therefore identical ROC-AUC by construction.)")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -461,6 +591,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     p.add_argument("--no-use-study", dest="use_study", action="store_false")
     p.set_defaults(func=mode_final)
+
+    p = sub.add_parser("reweight", help="does scale_pos_weight help? (paired test)")
+    p.add_argument("--n-estimators", type=int, required=True)
+    p.add_argument(
+        "--weight",
+        type=float,
+        default=None,
+        help="scale_pos_weight; defaults to the neg/pos ratio (~11.4)",
+    )
+    p.add_argument("--use-study", action="store_true", default=True)
+    p.add_argument("--no-use-study", dest="use_study", action="store_false")
+    p.set_defaults(func=mode_reweight)
 
     args = parser.parse_args(argv)
     args.func(args)
