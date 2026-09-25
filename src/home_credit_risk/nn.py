@@ -75,6 +75,14 @@ class NNConfig:
     #: Worth +0.00117 -- real, in the predicted direction, but a third the size of the
     #: feature-set effect below.
     indicators: bool = True
+    #: TabM ensemble members. 32 is the paper's default; cost grows sub-linearly
+    #: because the weight matrix is shared, but activations are (batch, k, width).
+    k: int = 32
+    #: Periodic embeddings for numeric features (Gorishniy et al., 2022) instead of
+    #: feeding scaled scalars straight in. Only consumed by ``arch="tabm"`` for now.
+    periodic: bool = False
+    d_embedding: int = 24
+    sigma: float = 0.05
     #: Entity embeddings (True) or one-hot encoding (False) for categoricals.
     #: **Measured**: one-hot scored 0.78103 against embeddings' 0.78011. Embeddings pay
     #: off at thousands of levels; the widest column here has 58, where one-hot costs
@@ -299,6 +307,130 @@ class ResNetMLP(nn.Module):
         return out
 
 
+class PeriodicEmbeddings(nn.Module):
+    """
+    Per-feature periodic embedding of numeric columns (Gorishniy et al., 2022).
+
+    Each scalar ``x`` becomes ``[sin(2*pi*c*x), cos(2*pi*c*x)]`` over learned
+    frequencies
+    ``c``, then a per-feature linear + ReLU. The point is resolution: a single weight
+    can
+    only give a linear response to a numeric feature, whereas a bank of frequencies lets
+    the first layer represent thresholds and non-monotone responses — the things a tree
+    gets for free by splitting the same column twice.
+
+    ``sigma`` sets the frequency scale and is the one sensitive hyperparameter; too
+    large
+    and the embedding aliases nearby values into unrelated codes.
+    """
+
+    def __init__(
+        self, n_features: int, d_embedding: int = 24, sigma: float = 0.05
+    ) -> None:
+        super().__init__()
+        if d_embedding % 2:
+            raise ValueError("d_embedding must be even (half sin, half cos)")
+        self.coeffs = nn.Parameter(torch.randn(n_features, d_embedding // 2) * sigma)
+        self.linear = nn.Parameter(torch.empty(n_features, d_embedding, d_embedding))
+        self.bias = nn.Parameter(torch.zeros(n_features, d_embedding))
+        bound = d_embedding**-0.5
+        nn.init.uniform_(self.linear, -bound, bound)
+        self.out_features = n_features * d_embedding
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = 2 * math.pi * self.coeffs.unsqueeze(0) * x.unsqueeze(-1)
+        z = torch.cat([torch.sin(z), torch.cos(z)], dim=-1)
+        z = torch.einsum("bfd,fde->bfe", z, self.linear) + self.bias
+        out: torch.Tensor = torch.relu(z).flatten(1)
+        return out
+
+
+class BatchEnsembleLinear(nn.Module):
+    """
+    One shared weight matrix plus a cheap rank-1 adapter per ensemble member.
+
+    This is what makes TabM affordable: ``k`` members share ``weight`` and differ only
+    by
+    per-member input/output scaling vectors, so the parameter count is that of one model
+    plus ``k * (in + 2*out)`` rather than ``k`` times everything.
+
+    The sign initialisation is load-bearing. Initialising ``r`` and ``s`` to random +/-1
+    makes the members functionally distinct from step zero; initialise them to ones and
+    every member computes the identical function and the ensemble collapses.
+    """
+
+    def __init__(self, in_features: int, out_features: int, k: int) -> None:
+        super().__init__()
+        self.k = k
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        self.r = nn.Parameter(torch.randint(0, 2, (k, in_features)).float() * 2 - 1)
+        self.s = nn.Parameter(torch.randint(0, 2, (k, out_features)).float() * 2 - 1)
+        self.bias = nn.Parameter(torch.zeros(k, out_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, k, in_features)
+        out: torch.Tensor = (x * self.r) @ self.weight.T * self.s + self.bias
+        return out
+
+
+class TabM(nn.Module):
+    """
+    A BatchEnsemble MLP — ``k`` implicit members trained as one model (ICLR 2025).
+
+    Motivated directly by this project's own measurement: rank-averaging 5 independently
+    seeded MLPs was worth +0.00283, more than every preprocessing and architecture
+    change
+    in the round combined. That result says the win is *ensembling*, not any particular
+    architecture — and 5 seeds cost 5 full training runs. TabM aims at the same effect
+    for
+    roughly the price of one.
+
+    Every member sees the same row and produces its own logit; the loss is averaged over
+    members, and prediction averages their probabilities.
+    """
+
+    def __init__(
+        self,
+        n_numeric: int,
+        cardinalities: Sequence[int],
+        hidden: Sequence[int],
+        dropout: float,
+        k: int = 32,
+        embed: Optional[PeriodicEmbeddings] = None,
+    ) -> None:
+        super().__init__()
+        self.k = k
+        self.embed = embed
+        self.embeddings = nn.ModuleList(
+            [nn.Embedding(c + 1, embedding_dim(c)) for c in cardinalities]
+        )
+        numeric_width = embed.out_features if embed is not None else n_numeric
+        width = numeric_width + sum(embedding_dim(c) for c in cardinalities)
+        self.layers = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for size in hidden:
+            self.layers.append(BatchEnsembleLinear(width, size, k))
+            self.norms.append(nn.BatchNorm1d(size))
+            width = size
+        self.head = BatchEnsembleLinear(width, 1, k)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
+        parts = [self.embed(x_num) if self.embed is not None else x_num]
+        for j, emb in enumerate(self.embeddings):
+            parts.append(emb(x_cat[:, j]))
+        z = torch.cat(parts, dim=1).unsqueeze(1).expand(-1, self.k, -1)
+        for layer, norm in zip(self.layers, self.norms):
+            z = layer(z)
+            # BatchNorm1d takes 2-D input, so members are folded into the batch axis.
+            b, k, f = z.shape
+            z = norm(z.reshape(b * k, f)).reshape(b, k, f)
+            z = self.drop(torch.nn.functional.gelu(z))
+        out: torch.Tensor = self.head(z).squeeze(-1)  # (batch, k)
+        return out
+
+
 def build_model(
     config: NNConfig, n_numeric: int, cardinalities: Sequence[int]
 ) -> nn.Module:
@@ -307,6 +439,20 @@ def build_model(
         return EmbeddingMLP(n_numeric, cardinalities, config.hidden, config.dropout)
     if config.arch == "resnet":
         return ResNetMLP(n_numeric, cardinalities, config.hidden, config.dropout)
+    if config.arch == "tabm":
+        embed = (
+            PeriodicEmbeddings(n_numeric, config.d_embedding, config.sigma)
+            if config.periodic
+            else None
+        )
+        return TabM(
+            n_numeric,
+            cardinalities,
+            config.hidden,
+            config.dropout,
+            k=config.k,
+            embed=embed,
+        )
     raise ValueError(f"unknown arch {config.arch!r}")
 
 
@@ -345,7 +491,11 @@ def _train_fold(
             if len(idx) < 2:  # BatchNorm needs >1 row
                 continue
             optimiser.zero_grad(set_to_none=True)
-            loss = loss_fn(model(xn_tr[idx], xc_tr[idx]), y_tr[idx])
+            logits = model(xn_tr[idx], xc_tr[idx])
+            if logits.ndim == 2:  # TabM: (batch, k) — one logit per member
+                loss = loss_fn(logits, y_tr[idx].unsqueeze(1).expand_as(logits))
+            else:
+                loss = loss_fn(logits, y_tr[idx])
             loss.backward()
             optimiser.step()
             schedule.step()
@@ -353,7 +503,12 @@ def _train_fold(
         model.eval()
         with torch.no_grad():
             logits = model(xn_va, xc_va)
-            preds = torch.sigmoid(logits).float().cpu().numpy()
+            probs = torch.sigmoid(logits)
+            # Average member *probabilities*, not logits: the members are an ensemble,
+            # and averaging in logit space would weight confident members more heavily.
+            if probs.ndim == 2:
+                probs = probs.mean(dim=1)
+            preds = probs.float().cpu().numpy()
         auc = float(roc_auc_score(y_va, preds))
         if auc > best_auc:
             best_auc, best_preds, best_epoch, stale = auc, preds, epoch, 0

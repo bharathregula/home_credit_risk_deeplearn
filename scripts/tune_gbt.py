@@ -54,6 +54,7 @@ from home_credit_risk.modeling import (  # noqa: E402
 from home_credit_risk.tracking import (  # noqa: E402
     log_cv_metrics,
     log_feature_importance,
+    log_oof_predictions,
     log_text_artifact,
     start_run,
 )
@@ -407,6 +408,9 @@ def mode_final(args: argparse.Namespace) -> None:
                 "oof_pr_auc": result.oof_pr_auc,
                 "runtime_seconds": time.time() - t0,
             },
+        )
+        log_oof_predictions(
+            result.oof_pred, y, out_dir=OUT_DIR / "oof", filename="gbt-final.npz"
         )
         imp = log_feature_importance(feature_cols, result.importances.tolist())
         shortlist = imp.head(200)["feature"].to_list()

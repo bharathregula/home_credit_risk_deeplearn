@@ -22,6 +22,13 @@ Stage C — architectures, with Stage-B preprocessing frozen::
     uv run python scripts/run_nn.py --arch resnet
     uv run python scripts/run_nn.py --arch mlp --seeds 5   # seed ensemble (ranks)
 
+Stage D — the two directions the evidence actually favours. Seed-ensembling was worth
+more than every architecture and preprocessing change combined, and numeric encoding is
+reported to matter more than architecture, so both are tried before any transformer::
+
+    uv run python scripts/run_nn.py --arch tabm            # implicit 32-member ensemble
+    uv run python scripts/run_nn.py --arch tabm --periodic   # + periodic numeric embeds
+
 Every run logs to MLflow tagged ``round=nn`` so it lands on the same leaderboard as the
 tree and logistic runs, and prints its position against both.
 """
@@ -44,13 +51,18 @@ from home_credit_risk.nn import (  # noqa: E402
     cross_validate_nn,
     resolve_device,
 )
-from home_credit_risk.tracking import log_cv_metrics, start_run  # noqa: E402
+from home_credit_risk.tracking import (  # noqa: E402
+    log_cv_metrics,
+    log_oof_predictions,
+    start_run,
+)
 
 # Deliberately NOT importing scripts/tune_gbt.py: it pulls in LightGBM, whose OpenMP
 # runtime collides with PyTorch's and segfaults the process. A network run must load
 # exactly one numeric backend.
 DATASETS = Path("~/code/datasets/home-credit-default-risk").expanduser()
 SHORTLIST = Path("~/code/datasets/gbt_shortlist.txt").expanduser()
+OOF_DIR = DATASETS.parent / "oof"
 
 # Reference points from the completed tree round, for the comparison printed at the end.
 GBT_OOF = 0.79478
@@ -60,7 +72,15 @@ LOGISTIC_OOF = 0.77741
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arch", choices=["mlp", "resnet"], default="mlp")
+    parser.add_argument("--arch", choices=["mlp", "resnet", "tabm"], default="mlp")
+    # TabM: implicit ensembling inside one model. Motivated by this round's own
+    # finding that 5-seed rank-averaging (+0.00283) beat every other change.
+    parser.add_argument("--k", type=int, default=32, help="TabM members")
+    parser.add_argument(
+        "--periodic", action=argparse.BooleanOptionalAction, default=False
+    )
+    parser.add_argument("--d-embedding", type=int, default=24)
+    parser.add_argument("--sigma", type=float, default=0.05)
     # Defaults are the Stage-B measured winner: standard scaling, indicators on,
     # one-hot categoricals. Both directions are available for re-ablation.
     parser.add_argument(
@@ -109,6 +129,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 "rankgauss" if args.quantile else None,
                 None if args.indicators else "noind",
                 "emb" if args.embeddings else None,
+                f"k{args.k}" if args.arch == "tabm" else None,
+                "plr" if args.periodic else None,
                 f"x{args.seeds}" if args.seeds > 1 else None,
             ],
         )
@@ -130,6 +152,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             quantile=args.quantile,
             indicators=args.indicators,
             embeddings=args.embeddings,
+            k=args.k,
+            periodic=args.periodic,
+            d_embedding=args.d_embedding,
+            sigma=args.sigma,
             device=device,
             seed=SEED + s,
         )
@@ -165,6 +191,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             "quantile": args.quantile,
             "indicators": args.indicators,
             "embeddings": args.embeddings,
+            "k": args.k if args.arch == "tabm" else None,
+            "periodic": args.periodic,
             "seeds": args.seeds,
             "epochs": args.epochs,
             "patience": args.patience,
@@ -185,6 +213,9 @@ def main(argv: Optional[List[str]] = None) -> None:
                 "runtime_seconds": time.time() - t0,
             },
         )
+        # The blend stage consumes this vector rather than re-fitting both families
+        # in one interpreter, which would load two OpenMP runtimes and segfault.
+        log_oof_predictions(blended, y, out_dir=OOF_DIR, filename=f"{label}.npz")
 
     print(f"\n{label}")
     print(f"  OOF ROC-AUC {oof_auc:.5f}   PR-AUC {oof_pr:.5f}")

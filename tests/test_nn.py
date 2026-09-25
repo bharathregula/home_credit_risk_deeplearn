@@ -1,10 +1,12 @@
 import numpy as np
 import polars as pl
 import pytest
+import torch
 
 from home_credit_risk.evaluation import TimeBudgetExceeded
 from home_credit_risk.nn import (
     NNConfig,
+    build_model,
     cross_validate_nn,
     embedding_dim,
     encode_categoricals,
@@ -189,3 +191,68 @@ def test_best_iterations_records_the_early_stopping_epoch() -> None:
 
     # Epochs, not tree counts -- bounded by max_epochs.
     assert all(1 <= e <= TINY.max_epochs for e in result.best_iterations)
+
+
+def test_tabm_members_are_not_identical_at_init() -> None:
+    # The whole premise of BatchEnsemble is that random sign init makes members
+    # functionally distinct. Initialise the adapters to ones and every member computes
+    # the same function, so the "ensemble" is one model wearing 32 hats.
+    from home_credit_risk.nn import BatchEnsembleLinear
+
+    layer = BatchEnsembleLinear(6, 4, k=8)
+    x = torch.randn(3, 8, 6)
+
+    out = layer(x)
+
+    assert out.shape == (3, 8, 4)
+    spread = out.std(dim=1).mean().item()
+    assert spread > 1e-3, "members collapsed to an identical function"
+
+
+def test_tabm_emits_one_logit_per_member() -> None:
+    fm, y, cols = _frame()
+    config = NNConfig(**{**TINY.__dict__, "arch": "tabm", "k": 4})
+    model = build_model(config, n_numeric=2, cardinalities=[3])
+
+    out = model(torch.randn(5, 2), torch.zeros(5, 1, dtype=torch.long))
+
+    assert out.shape == (5, 4)
+
+
+def test_tabm_trains_and_scores_every_row() -> None:
+    fm, y, cols = _frame()
+    config = NNConfig(**{**TINY.__dict__, "arch": "tabm", "k": 4})
+
+    result = cross_validate_nn(fm, cols, y, config, n_splits=3)
+
+    assert len(result.fold_scores) == 3
+    assert np.all((result.oof_pred > 0.0) & (result.oof_pred < 1.0))
+
+
+def test_periodic_embedding_widens_each_numeric_feature() -> None:
+    from home_credit_risk.nn import PeriodicEmbeddings
+
+    embed = PeriodicEmbeddings(n_features=3, d_embedding=8)
+
+    out = embed(torch.randn(5, 3))
+
+    assert out.shape == (5, 24)  # 3 features x 8 dims
+    assert embed.out_features == 24
+
+
+def test_periodic_embedding_rejects_an_odd_width() -> None:
+    from home_credit_risk.nn import PeriodicEmbeddings
+
+    with pytest.raises(ValueError, match="even"):
+        PeriodicEmbeddings(n_features=2, d_embedding=7)
+
+
+def test_tabm_with_periodic_embeddings_runs() -> None:
+    fm, y, cols = _frame()
+    config = NNConfig(
+        **{**TINY.__dict__, "arch": "tabm", "k": 2, "periodic": True, "d_embedding": 4}
+    )
+
+    result = cross_validate_nn(fm, cols, y, config, n_splits=2)
+
+    assert len(result.fold_scores) == 2

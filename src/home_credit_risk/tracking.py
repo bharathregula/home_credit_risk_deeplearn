@@ -33,9 +33,10 @@ The ``PYTHONPATH`` is not optional on Python 3.14: mlflow 3.14's UI server impor
 """
 
 import os
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 # MLflow 3 reports usage to mlflow-telemetry.io on import. Opt out before the import so
 # nothing about these runs leaves the machine; set MLFLOW_DISABLE_TELEMETRY=false in the
@@ -171,6 +172,51 @@ def log_text_artifact(text: str, filename: str) -> None:
 def log_file_artifact(path: Path) -> None:
     """Attach an existing file (e.g. a written CSV) to the run."""
     mlflow.log_artifact(str(path))
+
+
+def log_oof_predictions(
+    oof: np.ndarray,
+    y: np.ndarray,
+    out_dir: Optional[Path] = None,
+    filename: str = "oof.npz",
+) -> Optional[Path]:
+    """
+    Persist a run's out-of-fold prediction vector alongside its labels.
+
+    Summary scalars are enough to *rank* models and useless for anything that needs the
+    predictions themselves. Three things depend on this vector and were blocked without
+    it: blending (which consumes OOF predictions rather than re-fitting two families in
+    one interpreter — see :mod:`home_credit_risk.evaluation` on the OpenMP collision),
+    threshold selection, and every curve that is not a single number — ROC, calibration,
+    decile lift.
+
+    ``y`` is stored beside the predictions deliberately. A prediction vector is only
+    interpretable against the labels in the same row order, and a later reader has no
+    way to confirm the ordering matches unless both travel together.
+
+    Written to the MLflow run *and*, when ``out_dir`` is given, to a stable path — the
+    blend stage needs to find these without querying MLflow for run ids.
+    """
+    if oof.shape != y.shape:
+        raise ValueError(f"oof {oof.shape} and y {y.shape} must have the same shape")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = Path(tmp) / filename
+        np.savez_compressed(staged, oof=oof, y=y)
+        mlflow.log_artifact(str(staged))
+
+    if out_dir is None:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / filename
+    np.savez_compressed(path, oof=oof, y=y)
+    return path
+
+
+def load_oof(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Read back an ``oof.npz`` written by :func:`log_oof_predictions` as (oof, y)."""
+    with np.load(path) as data:
+        return data["oof"], data["y"]
 
 
 def run_history(

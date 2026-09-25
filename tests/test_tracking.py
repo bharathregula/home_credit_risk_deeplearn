@@ -2,13 +2,17 @@ from pathlib import Path
 from typing import TypedDict
 
 import mlflow
+import numpy as np
 import polars as pl
+import pytest
 
 from home_credit_risk.tracking import (
     best_runs,
     fold_scores,
+    load_oof,
     log_cv_metrics,
     log_feature_importance,
+    log_oof_predictions,
     log_text_artifact,
     resume_run,
     run_history,
@@ -193,3 +197,34 @@ def test_fold_scores_skips_unknown_runs_rather_than_raising(tmp_path: Path) -> N
     )
 
     assert set(folds["run_name"].to_list()) == {"real"}
+
+
+def test_oof_round_trips_through_a_stable_path(tmp_path: Path) -> None:
+    oof = np.array([0.1, 0.9, 0.4, 0.6])
+    y = np.array([0, 1, 0, 1])
+
+    with start_run("with-oof", **_store(tmp_path)):
+        path = log_oof_predictions(oof, y, out_dir=tmp_path / "oof")
+
+    assert path is not None
+    back_oof, back_y = load_oof(path)
+    np.testing.assert_array_equal(back_oof, oof)
+    np.testing.assert_array_equal(back_y, y)
+
+
+def test_oof_rejects_a_label_length_mismatch(tmp_path: Path) -> None:
+    # The vector is only interpretable against labels in the same row order; a length
+    # mismatch is the one misalignment that is cheap to catch, so catch it loudly
+    # rather than persisting a file nothing downstream can trust.
+    with start_run("bad-oof", **_store(tmp_path)):
+        with pytest.raises(ValueError, match="same shape"):
+            log_oof_predictions(np.zeros(4), np.zeros(3), out_dir=tmp_path / "oof")
+
+
+def test_oof_is_attached_to_the_run_even_without_a_stable_path(tmp_path: Path) -> None:
+    with start_run("artifact-only", **_store(tmp_path)) as run:
+        assert log_oof_predictions(np.zeros(3), np.zeros(3)) is None
+        run_id = run.info.run_id
+
+    files = [f.path for f in mlflow.MlflowClient().list_artifacts(run_id)]
+    assert "oof.npz" in files
