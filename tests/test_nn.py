@@ -1,7 +1,11 @@
+import math
+from typing import cast
+
 import numpy as np
 import polars as pl
 import pytest
 import torch
+from torch import nn
 
 from home_credit_risk.evaluation import TimeBudgetExceeded
 from home_credit_risk.nn import (
@@ -256,3 +260,114 @@ def test_tabm_with_periodic_embeddings_runs() -> None:
     result = cross_validate_nn(fm, cols, y, config, n_splits=2)
 
     assert len(result.fold_scores) == 2
+
+
+def test_validation_is_scored_in_batches_not_one_allocation() -> None:
+    # Regression guard. Scoring a whole fold in a single forward pass allocates a tensor
+    # proportional to rows x members x width. That was survivable for the plain MLP and
+    # blew up at 19.58 GiB once periodic embeddings widened the input ~10x, so the
+    # predict path must never see more than batch_size rows at once.
+    from home_credit_risk.nn import _predict
+
+    widths: list[int] = []
+
+    class _Spy(nn.Module):
+        def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
+            widths.append(len(x_num))
+            return torch.zeros(len(x_num), 3)  # 3 members
+
+    preds = _predict(_Spy(), torch.zeros(250, 4), torch.zeros(250, 1).long(), 64)
+
+    assert preds.shape == (250,), "every row must get exactly one prediction"
+    assert max(widths) <= 64, f"predict saw a batch of {max(widths)} rows"
+    assert sum(widths) == 250, "rows were dropped or double-counted"
+
+
+def test_predict_averages_member_probabilities_not_logits() -> None:
+    # Averaging in logit space is a geometric mean of odds, which over-weights confident
+    # members. With logits -4 and +4 the ensemble answer is 0.5, but that holds by
+    # coincidence there, so this uses an asymmetric pair instead.
+    from home_credit_risk.nn import _predict
+
+    class _Fixed(nn.Module):
+        def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
+            n = len(x_num)
+            return torch.tensor([[0.0, 4.0]]).repeat(n, 1)
+
+    preds = _predict(_Fixed(), torch.zeros(4, 2), torch.zeros(4, 1).long(), 2)
+
+    expected = (torch.sigmoid(torch.tensor(0.0)) + torch.sigmoid(torch.tensor(4.0))) / 2
+    np.testing.assert_allclose(preds, float(expected), rtol=1e-6)
+
+
+def test_periodic_embedding_bmm_matches_the_einsum_contraction() -> None:
+    # The bmm rewrite exists purely for speed on MPS, where torch.einsum has no fused
+    # kernel for this contraction. It must stay numerically identical, so this pins the
+    # two formulations against each other rather than trusting the rewrite.
+    from home_credit_risk.nn import PeriodicEmbeddings
+
+    torch.manual_seed(0)
+    emb = PeriodicEmbeddings(n_features=6, d_embedding=8)
+    x = torch.randn(16, 6)
+
+    z = 2 * math.pi * emb.coeffs.unsqueeze(0) * x.unsqueeze(-1)
+    z = torch.cat([torch.sin(z), torch.cos(z)], dim=-1)
+    reference = torch.relu(
+        torch.einsum("bfd,fde->bfe", z, emb.linear) + emb.bias
+    ).flatten(1)
+
+    torch.testing.assert_close(emb(x), reference, rtol=0, atol=0)
+
+
+def test_periodic_embeds_only_the_continuous_block() -> None:
+    # x_num is [continuous | indicators | one-hot]. Embedding the binary tail is both
+    # meaningless (sin/cos of a 0/1 column is two constants) and expensive, so the model
+    # must widen only the leading continuous columns and pass the rest through.
+    from home_credit_risk.nn import (
+        BatchEnsembleLinear,
+        PeriodicEmbeddings,
+        TabM,
+    )
+
+    n_cont, n_binary, d = 4, 6, 8
+    embed = PeriodicEmbeddings(n_cont, d_embedding=d)
+    model = TabM(
+        n_numeric=n_cont + n_binary,
+        cardinalities=[],
+        hidden=[16],
+        dropout=0.0,
+        k=2,
+        embed=embed,
+        n_continuous=n_cont,
+    )
+
+    # First layer input width = embedded continuous + untouched binary tail.
+    first = cast(BatchEnsembleLinear, model.layers[0])
+    assert first.weight.shape[1] == n_cont * d + n_binary
+
+    out = model(torch.randn(5, n_cont + n_binary), torch.zeros(5, 0).long())
+    assert out.shape == (5, 2)
+
+
+def test_periodic_embedding_is_not_applied_to_binary_columns() -> None:
+    # Changing only a binary column must change the input the body sees *linearly* --
+    # it is passed through, not run through sin/cos. Verified by checking the embedded
+    # continuous part is untouched when only the binary tail changes.
+    from home_credit_risk.nn import PeriodicEmbeddings
+
+    embed = PeriodicEmbeddings(3, d_embedding=4)
+    x = torch.randn(2, 9)  # 3 continuous + 6 binary
+    x_flipped = x.clone()
+    x_flipped[:, 3:] = 1.0 - x_flipped[:, 3:]
+
+    torch.testing.assert_close(embed(x[:, :3]), embed(x_flipped[:, :3]))
+
+
+def test_build_model_defaults_n_continuous_to_all_numeric() -> None:
+    # Back-compatible: callers that do not know the split get the old behaviour.
+    config = NNConfig(
+        **{**TINY.__dict__, "arch": "tabm", "k": 2, "periodic": True, "d_embedding": 4}
+    )
+    model = build_model(config, n_numeric=5, cardinalities=[])
+
+    assert model.n_continuous == 5

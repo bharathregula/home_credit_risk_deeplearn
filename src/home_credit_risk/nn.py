@@ -340,7 +340,14 @@ class PeriodicEmbeddings(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = 2 * math.pi * self.coeffs.unsqueeze(0) * x.unsqueeze(-1)
         z = torch.cat([torch.sin(z), torch.cos(z)], dim=-1)
-        z = torch.einsum("bfd,fde->bfe", z, self.linear) + self.bias
+        # bmm, not einsum. Mathematically identical -- per feature, multiply the
+        # (batch, d) block by that feature's (d, d) matrix -- but `torch.einsum` has no
+        # fused MPS kernel for this contraction and falls back to something very
+        # slow:
+        # a 5-fold run made 18 seconds of progress in 22 minutes of wall clock with
+        # the machine otherwise idle. Reshaping to an explicit batched matmul over
+        # the feature axis keeps it on the fast path.
+        z = torch.bmm(z.transpose(0, 1), self.linear).transpose(0, 1) + self.bias
         out: torch.Tensor = torch.relu(z).flatten(1)
         return out
 
@@ -398,14 +405,25 @@ class TabM(nn.Module):
         dropout: float,
         k: int = 32,
         embed: Optional[PeriodicEmbeddings] = None,
+        n_continuous: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.k = k
         self.embed = embed
+        # ``x_num`` arrives as [continuous | missingness indicators | one-hot], and only
+        # the leading continuous block may be periodically embedded. Embedding a 0/1
+        # column is meaningless -- sin/cos of two points -- and it is not free: with 192
+        # continuous columns against 290 binary ones, embedding all 482 would spend 60%
+        # of the capacity on nothing and cost 2.5x the compute.
+        self.n_continuous = n_numeric if n_continuous is None else n_continuous
         self.embeddings = nn.ModuleList(
             [nn.Embedding(c + 1, embedding_dim(c)) for c in cardinalities]
         )
-        numeric_width = embed.out_features if embed is not None else n_numeric
+        numeric_width = (
+            embed.out_features + (n_numeric - self.n_continuous)
+            if embed is not None
+            else n_numeric
+        )
         width = numeric_width + sum(embedding_dim(c) for c in cardinalities)
         self.layers = nn.ModuleList()
         self.norms = nn.ModuleList()
@@ -417,7 +435,14 @@ class TabM(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
-        parts = [self.embed(x_num) if self.embed is not None else x_num]
+        if self.embed is None:
+            parts = [x_num]
+        else:
+            # Embed the continuous block; pass the binary tail through untouched.
+            parts = [
+                self.embed(x_num[:, : self.n_continuous]),
+                x_num[:, self.n_continuous :],
+            ]
         for j, emb in enumerate(self.embeddings):
             parts.append(emb(x_cat[:, j]))
         z = torch.cat(parts, dim=1).unsqueeze(1).expand(-1, self.k, -1)
@@ -432,7 +457,10 @@ class TabM(nn.Module):
 
 
 def build_model(
-    config: NNConfig, n_numeric: int, cardinalities: Sequence[int]
+    config: NNConfig,
+    n_numeric: int,
+    cardinalities: Sequence[int],
+    n_continuous: Optional[int] = None,
 ) -> nn.Module:
     """Instantiate the architecture named by ``config.arch``."""
     if config.arch == "mlp":
@@ -440,8 +468,9 @@ def build_model(
     if config.arch == "resnet":
         return ResNetMLP(n_numeric, cardinalities, config.hidden, config.dropout)
     if config.arch == "tabm":
+        n_cont = n_numeric if n_continuous is None else n_continuous
         embed = (
-            PeriodicEmbeddings(n_numeric, config.d_embedding, config.sigma)
+            PeriodicEmbeddings(n_cont, config.d_embedding, config.sigma)
             if config.periodic
             else None
         )
@@ -452,8 +481,38 @@ def build_model(
             config.dropout,
             k=config.k,
             embed=embed,
+            n_continuous=n_cont,
         )
     raise ValueError(f"unknown arch {config.arch!r}")
+
+
+def _predict(
+    model: nn.Module, x_num: torch.Tensor, x_cat: torch.Tensor, batch_size: int
+) -> np.ndarray:
+    """
+    Score rows in batches, averaging TabM's per-member probabilities.
+
+    Batching here is not an optimisation — it is a correctness requirement. Scoring a
+    whole fold in one forward pass allocates a tensor proportional to
+    ``rows x members x width``, and that product is only small by accident: a plain MLP
+    needs ~118 MB, but TabM with periodic embeddings widens 192 numeric features to
+    4,608 dims and multiplies by ``k`` members, which demanded **19.58 GiB in a single
+    allocation** and aborted the run. Any architecture that widens its input
+    re-triggers it.
+
+    Member probabilities are averaged, never logits: the members are an ensemble, and
+    averaging in logit space is a geometric mean of odds that weights confident members
+    more heavily than an ensemble should.
+    """
+    out: List[np.ndarray] = []
+    with torch.no_grad():
+        for start in range(0, len(x_num), batch_size):
+            stop = start + batch_size
+            probs = torch.sigmoid(model(x_num[start:stop], x_cat[start:stop]))
+            if probs.ndim == 2:
+                probs = probs.mean(dim=1)
+            out.append(probs.float().cpu().numpy())
+    return np.concatenate(out) if out else np.zeros(0, dtype=float)
 
 
 def _train_fold(
@@ -501,14 +560,7 @@ def _train_fold(
             schedule.step()
 
         model.eval()
-        with torch.no_grad():
-            logits = model(xn_va, xc_va)
-            probs = torch.sigmoid(logits)
-            # Average member *probabilities*, not logits: the members are an ensemble,
-            # and averaging in logit space would weight confident members more heavily.
-            if probs.ndim == 2:
-                probs = probs.mean(dim=1)
-            preds = probs.float().cpu().numpy()
+        preds = _predict(model, xn_va, xc_va, config.batch_size)
         auc = float(roc_auc_score(y_va, preds))
         if auc > best_auc:
             best_auc, best_preds, best_epoch, stale = auc, preds, epoch, 0
@@ -591,7 +643,9 @@ def cross_validate_nn(
         xn_va = torch.as_tensor(xn_va_np, dtype=torch.float32, device=device)
         y_tr = torch.as_tensor(y[tr], dtype=torch.float32, device=device)
 
-        model = build_model(config, xn_tr.shape[1], cardinalities).to(device)
+        model = build_model(
+            config, xn_tr.shape[1], cardinalities, n_continuous=raw_numeric.shape[1]
+        ).to(device)
         preds, best_epoch = _train_fold(
             model, xn_tr, xc_tr, y_tr, xn_va, xc_va, y[va], config, deadline
         )
