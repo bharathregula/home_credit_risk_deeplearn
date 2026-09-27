@@ -399,6 +399,80 @@ determinism check on the whole pipeline. Calibration was the decisive factor: th
 unweighted model is well calibrated with no post-hoc correction (0.988× the base rate),
 and the reweighted one is not usable as a PD.
 
+## Stage D — the two techniques the evidence favoured over a transformer
+
+The plan called for tabular transformers next. Two cheaper candidates were run first,
+both chosen because they extend findings this project had already *measured* rather than
+importing a technique on reputation: seed-ensembling was the round's largest effect
+(+0.00283), and 53 of 159 numeric features have `max/p99 > 10`.
+
+| Model | OOF ROC-AUC | Δ vs previous | Runtime |
+|---|---:|---:|---:|
+| NN 5-seed ensemble (Stage C best) | 0.78500 | — | 5 runs |
+| **TabM, k=8** | **0.78711** | **+0.00211** | 1,304s |
+| **TabM k=8 + periodic embeddings d=8** | **0.78886** | **+0.00175** | 4,042s |
+
+Both effects are established, and they stack: the neural family's deficit to the GBT fell
+from **0.01243** (single-seed MLP) to **0.00592**, more than halving in one round.
+
+### TabM — implicit ensembling at one model's cost
+
+A shared weight matrix plus a rank-1 adapter per member (Gorishniy et al., ICLR 2025).
+**k=8 beat a 5-seed rank-averaged ensemble by +0.00211 (~4.9 SE) in a single training run
+instead of five.** The random sign initialisation of the adapters is load-bearing:
+initialised to ones, every member computes an identical function and the ensemble
+collapses to one model. There is a test asserting members do not collapse.
+
+### Periodic numeric embeddings — 5 of 5 folds
+
+Each scalar becomes `[sin(2πcx), cos(2πcx)]` over learned frequencies, then a per-feature
+linear (Gorishniy et al., 2022). The argument is resolution: one weight gives only a
+*linear* response to a numeric column, whereas a frequency bank can express thresholds and
+non-monotone responses — what a tree gets free by splitting the same column twice.
+
+| Fold | TabM k=8 | + periodic d=8 | Δ |
+|---|---:|---:|---:|
+| 1 | 0.78296 | 0.78442 | +0.00146 |
+| 2 | 0.79245 | 0.79578 | +0.00333 |
+| 3 | 0.78563 | 0.78564 | **+0.00001** |
+| 4 | 0.79000 | 0.79243 | +0.00243 |
+| 5 | 0.78498 | 0.78716 | +0.00218 |
+| **OOF** | **0.78711** | **0.78886** | **+0.00175** |
+
+**5 of 5 folds, exact sign test p = 0.031.** Two caveats belong with the number. Fold 3 is
+a dead heat, so four folds carry the effect and one says nothing — and the fold-to-fold
+spread (0.00001 to 0.00333) exceeds the effect size, which is precisely why the paired
+test is required rather than optional. Second, **`d=8` was chosen for tractability, not
+tuned**: on fold 1 `d=24` scored 0.78464 against `d=8`'s 0.78442, so the wider setting may
+be marginally better, but it costs ~3× and never completed on this hardware. `d=8` is
+*sufficient*, not optimal.
+
+Cost is real: **3.1× TabM's runtime for +0.00175**.
+
+### Why these two won when three earlier imports lost
+
+Rank-gauss, entity embeddings and ResNet-MLP all lost, each backwards from prediction.
+The pattern that separates them is whether the technique addresses a bottleneck *this*
+problem actually has. Embeddings solve high cardinality (the widest column here has 58
+levels); rank-gauss solves input conditioning (BatchNorm already does); residual blocks
+solve depth (three layers is not deep). Ensembling and numeric resolution, by contrast,
+target constraints this data demonstrably exhibits — seed variance was the largest
+measured effect in the round, and the heavy numeric tails are documented above.
+
+### Three defects found by running this ablation
+
+All three were latent and would have bitten any future wide-input architecture:
+
+1. **Validation was scored in one un-batched forward pass** — harmless at ~118 MB for a
+   plain MLP, but periodic embeddings widen the numeric block ~10× and, multiplied by `k`
+   members across 61,502 rows, demanded **19.58 GiB in a single allocation**.
+2. **`torch.einsum` has no fused MPS kernel** for this contraction and fell back to
+   something pathological: 18 seconds of CPU progress in 22 minutes with the machine
+   otherwise idle. Replaced by an explicit batched matmul, bit-identical at `rtol=0`.
+3. **Periodic embeddings were applied to all 482 numeric columns** when only 192 are
+   continuous. Embedding a 0/1 indicator yields two constants, so 60% of the capacity
+   encoded nothing at 2.5× the compute.
+
 ## Next steps
 
 1. **NN round — the pivot.** GBT optimisation is closed; see below for why. Run on the

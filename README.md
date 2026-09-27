@@ -107,6 +107,8 @@ statistical imputation and selection is done null-natively).
 |---|---|---|
 | **LightGBM GBT** | 945 | **0.79478** |
 | LightGBM GBT | 200 shortlist | 0.79456 |
+| **TabM k=8 + periodic embeddings** | 200 | **0.78886** |
+| TabM, k=8 | 200 | 0.78711 |
 | Neural net, 5-seed ensemble | 200 | 0.78500 |
 | Neural net, single seed | 200 | 0.78235 |
 | ResNet-MLP | 200 | 0.77900 |

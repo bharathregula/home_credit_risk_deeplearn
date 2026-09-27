@@ -130,7 +130,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 None if args.indicators else "noind",
                 "emb" if args.embeddings else None,
                 f"k{args.k}" if args.arch == "tabm" else None,
-                "plr" if args.periodic else None,
+                f"plr{args.d_embedding}" if args.periodic else None,
                 f"x{args.seeds}" if args.seeds > 1 else None,
             ],
         )
@@ -193,6 +193,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             "embeddings": args.embeddings,
             "k": args.k if args.arch == "tabm" else None,
             "periodic": args.periodic,
+            "d_embedding": args.d_embedding if args.periodic else None,
+            "sigma": args.sigma if args.periodic else None,
             "seeds": args.seeds,
             "epochs": args.epochs,
             "patience": args.patience,
