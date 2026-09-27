@@ -473,6 +473,33 @@ All three were latent and would have bitten any future wide-input architecture:
    continuous. Embedding a 0/1 indicator yields two constants, so 60% of the capacity
    encoded nothing at 2.5× the compute.
 
+### A better network does not make a better blend
+
+Blending (Stage 3) consumes persisted OOF vectors. With three networks now on disk, the
+question "is the blend stage worth building?" can be answered for a few seconds of numpy
+rather than a round of work.
+
+| Network | Solo | Spearman ρ vs GBT | Best blend | Δ over GBT alone |
+|---|---:|---:|---:|---:|
+| MLP, 5-seed ensemble | 0.78500 | 0.9303 | 0.79521 | +0.00042 |
+| TabM k=8 | 0.78711 | 0.9447 | 0.79520 | +0.00042 |
+| TabM k=8 + periodic d=8 | 0.78886 | **0.9496** | 0.79537 | +0.00059 |
+
+**Improving the network made it more correlated with the tree, not less** — ρ climbed
+monotonically with solo score. Stage D's **+0.00386** of solo gain bought **+0.00017** of
+blend gain: the network got better by learning what the GBT already knew.
+
+The optimal weight on the network does rise (0.15 → 0.20 → 0.25), so the blender
+recognises the improvement; there is simply little independent signal to combine. Every
+blend here sits under the **0.0013** (3 SE) bar, and each weight was selected on the very
+data being scored, so even +0.00059 is optimistic.
+
+**Implication for Stage 3:** rank-averaging GBT with a *better MLP-family network* is not
+a promising direction, and further NN tuning will not change that. A blend would need a
+model that is wrong in genuinely different places — a different feature view, or a
+sequence model over the raw ledgers (cf. E.T.-RNN, KDD 2019) rather than the same
+aggregated table.
+
 ## Next steps
 
 1. **NN round — the pivot.** GBT optimisation is closed; see below for why. Run on the
